@@ -2,13 +2,18 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { AnalysisReportData } from './types';
-import { analyzeGames, model as geminiModel } from './services/geminiService';
 import { fetchPgnFromLichess } from './services/lichessService';
 import { usePgnParser, detectUserFromPgn, findUserGames } from './hooks/usePgnParser';
+import useSettings from './hooks/useSettings';
+import geminiService from './services/geminiService';
+import openAIService from './services/openAIService'; // Placeholder
+import { ILLMService } from './services/llmService';
+
 import FileUpload, { FileUploadRef } from './components/FileUpload';
 import AnalysisReport from './components/AnalysisReport';
 import Spinner from './components/Spinner';
-import { LayoutGrid, BrainCircuit, Target, Shield, BookOpen, AlertTriangle } from 'lucide-react';
+import Settings from './components/Settings';
+import { LayoutGrid, BrainCircuit, Target, Settings as SettingsIcon, X, AlertTriangle } from 'lucide-react';
 
 type DataSource = 'upload' | 'lichess';
 
@@ -19,8 +24,16 @@ interface Report {
   analysisDate: Date;
 }
 
+// Map services to provider IDs
+const services: Record<string, ILLMService> = {
+  gemini: geminiService,
+  openai: openAIService,
+};
+
 const App: React.FC = () => {
   const { t, i18n } = useTranslation();
+  const { settings, providers } = useSettings();
+  
   const [pgnContent, setPgnContent] = useState<string | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [isFetchingPgn, setIsFetchingPgn] = useState<boolean>(false);
@@ -28,9 +41,9 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [dataSource, setDataSource] = useState<DataSource>('lichess');
   const [lichessUsername, setLichessUsername] = useState('');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const fileUploadRef = useRef<FileUploadRef>(null);
 
-  // This hook is now primarily for the UI display before analysis is triggered.
   const { lostGamesPgn, gameDates, detectedUser } = usePgnParser(pgnContent);
 
   const getGameDateRange = (dates: string[]): string => {
@@ -49,7 +62,6 @@ const App: React.FC = () => {
       setPgnContent(null);
       return;
     }
-    // When file is selected, switch source and clear the other input
     setDataSource('upload');
     setLichessUsername('');
 
@@ -69,8 +81,6 @@ const App: React.FC = () => {
   const handleUsernameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const username = e.target.value;
     setLichessUsername(username);
-
-    // When user types, switch source and clear the other input
     setDataSource('lichess');
     if (fileUploadRef.current) {
         fileUploadRef.current.clearFile();
@@ -78,19 +88,32 @@ const App: React.FC = () => {
     setPgnContent(null);
   };
 
-
   const performAnalysis = useCallback(async (pgn: string, user: string) => {
-    // Fire-and-forget request to log usage on the server-side.
-    // This will show up in the Vercel function logs.
+    const selectedProviderId = settings.selectedProviderId;
+    if (!selectedProviderId) {
+      setError("Please select an AI provider in the settings.");
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    const apiKey = settings.apiKeys[selectedProviderId];
+    if (!apiKey) {
+      setError(`API key for ${providers.find(p => p.id === selectedProviderId)?.name} is missing. Please add it in the settings.`);
+      setIsSettingsOpen(true);
+      return;
+    }
+
+    const service = services[selectedProviderId];
+    if (!service) {
+      setError(`No service available for provider: ${selectedProviderId}`);
+      return;
+    }
+
     fetch('/api/log-usage', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: user }),
-    }).catch(logError => {
-        // We don't want to block the user flow if logging fails.
-        // Log to browser console for client-side debugging.
-        console.warn('Usage logging failed:', logError);
-    });
+      body: JSON.stringify({ username: user, provider: selectedProviderId }),
+    }).catch(logError => console.warn('Usage logging failed:', logError));
 
     const { lostGamesPgn, gameDates: parsedGameDates } = findUserGames(pgn, user);
     
@@ -108,13 +131,10 @@ const App: React.FC = () => {
       
       const currentLang = i18n.language;
       let apiLang: 'en' | 'de' | 'hy' = 'en';
-      if (currentLang.startsWith('de')) {
-        apiLang = 'de';
-      } else if (currentLang.startsWith('hy')) {
-        apiLang = 'hy';
-      }
+      if (currentLang.startsWith('de')) apiLang = 'de';
+      else if (currentLang.startsWith('hy')) apiLang = 'hy';
       
-      const result = await analyzeGames(gamesToAnalyze, user, apiLang);
+      const result = await service.analyzeGames(gamesToAnalyze, apiKey, user, apiLang);
       setReport({
         data: result,
         lichessUser: user,
@@ -127,7 +147,7 @@ const App: React.FC = () => {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [i18n.language, t]);
+  }, [i18n.language, t, settings]);
 
   const handleAnalyzeClick = useCallback(async () => {
     setError(null);
@@ -178,6 +198,8 @@ const App: React.FC = () => {
   
   const isAnalyzeButtonDisabled = isLoading || (dataSource === 'lichess' && !lichessUsername.trim()) || (dataSource === 'upload' && !pgnContent);
 
+  const selectedProviderName = providers.find(p => p.id === settings.selectedProviderId)?.name || 'Google Gemini';
+
   const mainContent = () => {
     if (isLoading) {
       return (
@@ -190,10 +212,9 @@ const App: React.FC = () => {
     }
 
     if (report) {
-      return <AnalysisReport data={report.data} lichessUser={report.lichessUser} modelName={geminiModel} gameDateRange={report.gameDateRange} analysisDate={report.analysisDate} />;
+      return <AnalysisReport data={report.data} lichessUser={report.lichessUser} modelName={selectedProviderName} gameDateRange={report.gameDateRange} analysisDate={report.analysisDate} />;
     }
 
-    // Default view when no analysis is running or report is available
     return (
       <div className="text-center p-8 bg-gray-secondary rounded-2xl w-full max-w-lg mx-auto">
         <div className="flex justify-center items-center mb-6 gap-4">
@@ -211,7 +232,6 @@ const App: React.FC = () => {
             </div>
         )}
 
-        {/* Lichess Username Input */}
         <div>
           <label htmlFor="lichess-username" className="block text-sm font-medium text-text-secondary mb-2">{t('lichessUsername')}</label>
           <input
@@ -230,7 +250,6 @@ const App: React.FC = () => {
             <div className="flex-grow border-t border-gray-tertiary"></div>
         </div>
         
-        {/* PGN File Upload */}
         <FileUpload ref={fileUploadRef} onFileSelect={handleFileSelect} />
         {dataSource === 'upload' && detectedUser && (
             <p className="text-sm text-accent mt-2">{t('autoUserDetection')}</p>
@@ -251,6 +270,17 @@ const App: React.FC = () => {
 
   return (
     <div className="min-h-screen bg-gray-primary flex flex-col items-center justify-center p-4 selection:bg-accent/30">
+      {isSettingsOpen && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-40 flex items-center justify-center">
+          <div className="bg-gray-secondary p-6 rounded-2xl shadow-2xl border border-gray-tertiary w-full max-w-md relative">
+            <button onClick={() => setIsSettingsOpen(false)} className="absolute top-3 right-3 text-text-secondary hover:text-text-primary">
+              <X size={24} />
+            </button>
+            <Settings />
+          </div>
+        </div>
+      )}
+
       <header className="w-full max-w-5xl mx-auto flex justify-between items-center mb-8 px-4">
         <h1 className="text-4xl font-bold text-text-primary">
           Chess<span className="text-accent">Trax</span>
@@ -259,13 +289,16 @@ const App: React.FC = () => {
             <button onClick={() => changeLanguage('en')} className={`px-3 py-1 text-sm rounded-md ${i18n.language.startsWith('en') ? 'bg-accent text-gray-primary font-bold' : 'text-text-secondary'}`}>EN</button>
             <button onClick={() => changeLanguage('de')} className={`px-3 py-1 text-sm rounded-md ${i18n.language.startsWith('de') ? 'bg-accent text-gray-primary font-bold' : 'text-text-secondary'}`}>DE</button>
             <button onClick={() => changeLanguage('hy')} className={`px-3 py-1 text-sm rounded-md ${i18n.language.startsWith('hy') ? 'bg-accent text-gray-primary font-bold' : 'text-text-secondary'}`}>HY</button>
+            <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-text-secondary hover:text-accent transition-colors">
+              <SettingsIcon size={20} />
+            </button>
         </div>
       </header>
       <main className="w-full max-w-5xl mx-auto">
         {mainContent()}
       </main>
       <footer className="w-full max-w-5xl mx-auto text-center mt-8 text-text-secondary text-xs">
-          <p>Analysis powered by Google Gemini. This is not a substitute for professional coaching.</p>
+          <p>Analysis powered by {selectedProviderName}. This is not a substitute for professional coaching.</p>
       </footer>
     </div>
   );

@@ -1,12 +1,7 @@
 
 import { GoogleGenAI, Type } from '@google/genai';
 import type { AnalysisReportData } from '../types';
-
-if (!process.env.API_KEY) {
-    throw new Error("API_KEY environment variable not set.");
-}
-
-const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+import { ILLMService } from './llmService';
 
 const analysisSchema = {
   type: Type.OBJECT,
@@ -64,75 +59,81 @@ const analysisSchema = {
   required: ["openingAnalysis", "tacticalMotifs", "strategicWeaknesses", "endgamePractice", "summary"]
 };
 
-export const model = "gemini-2.5-flash";
+export const model = "gemini-1.5-flash";
 
-export const analyzeGames = async (pgnOfLostGames: string, lichessUser: string, language: 'en' | 'de' | 'hy'): Promise<AnalysisReportData> => {
-  let languageName: string;
-  switch (language) {
-    case 'de':
-      languageName = 'German';
-      break;
-    case 'hy':
-      languageName = 'Armenian';
-      break;
-    default:
-      languageName = 'English';
-  }
-
-  const prompt = `
-    Analyze the following chess games that I, Lichess user "${lichessUser}", have lost.
-    Based on these games, create a personalized training plan.
-    Identify recurring patterns in my mistakes. Do not comment on individual blunders unless they exemplify a recurring pattern.
-    Focus on actionable advice.
-
-    Here are the PGNs of my lost games:
-    ---
-    ${pgnOfLostGames}
-    ---
-
-    IMPORTANT: The user has requested the output in ${languageName}. Generate the entire analysis and all text in the final JSON object in ${languageName}.
-    Provide the analysis in the structured JSON format as requested. Be concise but insightful.
-    `;
+class GeminiService implements ILLMService {
+  public async analyzeGames(pgnOfLostGames: string, apiKey: string, lichessUser: string, language: 'en' | 'de' | 'hy'): Promise<AnalysisReportData> {
+    const ai = new GoogleGenAI({ apiKey });
     
-    const maxRetries = 3;
-    let attempt = 0;
-
-    while (attempt < maxRetries) {
-        try {
-            const response = await ai.models.generateContent({
-                model: model,
-                contents: prompt,
-                config: {
-                    responseMimeType: "application/json",
-                    responseSchema: analysisSchema,
-                }
-            });
-
-            const jsonText = response.text.trim();
-            // Sometimes the API might wrap the JSON in markdown backticks
-            const cleanJsonText = jsonText.replace(/^```json\n?/, '').replace(/\n?```$/, '');
-            
-            const parsedData: AnalysisReportData = JSON.parse(cleanJsonText);
-            return parsedData;
-
-        } catch (error) {
-            console.error(`Attempt ${attempt + 1} failed:`, error);
-            const isOverloadedError = error instanceof Error && error.message.includes('"code":503');
-
-            if (isOverloadedError && attempt < maxRetries - 1) {
-                const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000; // Exponential backoff with jitter
-                console.log(`Model is overloaded. Retrying in ${Math.round(delay / 1000)}s...`);
-                await new Promise(res => setTimeout(res, delay));
-                attempt++;
-                continue;
-            }
-
-            if (error instanceof Error) {
-                throw new Error(`Failed to get analysis from AI: ${error.message}`);
-            }
-            throw new Error("An unknown error occurred while analyzing games.");
-        }
+    let languageName: string;
+    switch (language) {
+      case 'de':
+        languageName = 'German';
+        break;
+      case 'hy':
+        languageName = 'Armenian';
+        break;
+      default:
+        languageName = 'English';
     }
-    // This part should not be reachable if the loop is correct, but for type safety:
-    throw new Error("Failed to get analysis from AI after multiple retries.");
-};
+
+    const prompt = `
+      Analyze the following chess games that I, Lichess user "${lichessUser}", have lost.
+      Based on these games, create a personalized training plan.
+      Identify recurring patterns in my mistakes. Do not comment on individual blunders unless they exemplify a recurring pattern.
+      Focus on actionable advice.
+
+      Here are the PGNs of my lost games:
+      ---
+      ${pgnOfLostGames}
+      ---
+
+      IMPORTANT: The user has requested the output in ${languageName}. Generate the entire analysis and all text in the final JSON object in ${languageName}.
+      Provide the analysis in the structured JSON format as requested. Be concise but insightful.
+      `;
+      
+      const maxRetries = 3;
+      let attempt = 0;
+
+      while (attempt < maxRetries) {
+          try {
+              const response = await ai.models.generateContent({
+                  model: model,
+                  contents: prompt,
+                  config: {
+                      responseMimeType: "application/json",
+                      responseSchema: analysisSchema,
+                  }
+              });
+
+              const jsonText = response.text.trim();
+              // Sometimes the API might wrap the JSON in markdown backticks
+              const cleanJsonText = jsonText.replace(/^```json\n?/, '').replace(/\n?```$/, '');
+              
+              const parsedData: AnalysisReportData = JSON.parse(cleanJsonText);
+              return parsedData;
+
+          } catch (error) {
+              console.error(`Attempt ${attempt + 1} failed:`, error);
+              const isOverloadedError = error instanceof Error && error.message.includes('"code":503');
+
+              if (isOverloadedError && attempt < maxRetries - 1) {
+                  const delay = Math.pow(2, attempt) * 1000 + Math.random() * 1000; // Exponential backoff with jitter
+                  console.log(`Model is overloaded. Retrying in ${Math.round(delay / 1000)}s...`);
+                  await new Promise(res => setTimeout(res, delay));
+                  attempt++;
+                  continue;
+              }
+
+              if (error instanceof Error) {
+                  throw new Error(`Failed to get analysis from AI: ${error.message}`);
+              }
+              throw new Error("An unknown error occurred while analyzing games.");
+          }
+      }
+      // This part should not be reachable if the loop is correct, but for type safety:
+      throw new Error("Failed to get analysis from AI after multiple retries.");
+  }
+}
+
+export default new GeminiService();
